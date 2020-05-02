@@ -1,0 +1,290 @@
+// Ingo Lohs
+// 02.05.2020 - V1.1
+
+// die beiden BME280 hören auf die gleiche I2C-Adresse. Lt. AZ-Delivery ist in der Adafruit_BMP280.h die Adresse von (0x77) wie folgt anzupassen:
+// #define BMP280_ADDRESS (0x76), but you cannot have two devices with the same address on the same SDA/SCL pins
+// Optionen:
+// * es könnte ein anderes, vergleichbares Produkt von Adafruit BME280 zum Einsatz kommen, bei dem man die i2c-adresse austauschen kann.
+// * man setzt einen anderen Temperaturfühler ein.
+// * man nutzt einen i2c multiplexer - Adafruit 2717 für rund 8-12 Euro und kann damit 8 identische i2c-Sensoren ansprechen.
+// * noch einen weiteren Arduino einsetzen und eine weitere Radio-Modul Lösung einsetzen
+// * ein Temperaturmodul mit SPI einsetzen
+
+/*
+12:08:58.811 -> TCAScanner ready!
+12:08:58.811 -> TCA Port #0
+12:08:58.811 -> TCA Port #1
+12:08:58.846 -> TCA Port #2 - BME280 - Sensor1
+12:08:58.846 -> Found I2C 0x76
+12:08:58.846 -> TCA Port #3
+12:08:58.880 -> TCA Port #4
+12:08:58.880 -> TCA Port #5 - BME280 - Sensor2
+12:08:58.914 -> Found I2C 0x76
+12:08:58.914 -> TCA Port #6
+12:08:58.914 -> TCA Port #7
+12:08:58.949 -> 
+12:08:58.949 -> done
+*/
+
+// ask_receiver.pde
+// -*- mode: C++ -*-
+// Simple example of how to use RadioHead to receive messages
+// with a simple ASK transmitter in a very simple way.
+// Implements a simplex (one-way) receiver with an Rx-B1 module
+
+#include <RH_ASK.h>
+#include <SPI.h> // Not actualy used but needed to compile
+
+RH_ASK driver;
+
+struct dataStruct{
+//  float press_norm ;
+//  float press_hg;
+  float temp;
+  float humidity;
+  unsigned long counter; 
+}myData;
+
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
+
+#define TCAADDR 0x70 // auch der Multiplexer wird über I2C angesprochen
+
+#define SEALEVELPRESSURE_HPA (1013.25)
+
+Adafruit_BME280 bme1; // I2C 
+Adafruit_BME280 bme2; // I2C
+
+#include <LiquidCrystal_I2C.h>
+LiquidCrystal_I2C lcd(0x27,20,4);  // set the LCD address to 0x27 for a 16 chars and 2 line display
+
+// switcht den Datentyp vom Radio Modul "char" wieder nach "float" um
+float temp_3_remote;
+float humi_3_remote;
+
+//the relays connect to
+int IN1 = 4;
+int IN2 = 5;
+
+#define ON   0
+#define OFF  1
+
+// --------------------------------Range-Bestimmung--------------------------------------------------------
+// Bestimmung der Schwellwerte für den idealen Temperaturbereich - ausschlaggebend ist S1 BME:
+int low_temp_threshold = 22;  // activate relay1 to warm a bit to reach target temp 30*C and lot much lower
+int high_temp_threshold = 25; // activate relay2 to cool a bit to hold target temp 30*C and not much more
+// denkbar wäre die Auswertung eines Mittelwertes über alle 3 Temperatur-Sensoren
+// --------------------------------Range-Bestimmung--------------------------------------------------------
+
+// Kontroll-LEDs
+int LED_green = 2;
+int LED_red = 3;
+
+int delay_time = 1000;
+
+/* Multiplexer */
+void tcaselect(uint8_t i) {
+  if (i > 7) return;
+ 
+  Wire.beginTransmission(TCAADDR);
+  Wire.write(1 << i);
+  Wire.endTransmission();  
+}
+
+/* Setup */
+void setup()
+{
+  // Schnittstelle
+  Serial.begin(9600);  // Debugging only
+
+  // LCD 2004A via I2C-Backpack
+  lcd.init();
+  lcd.backlight();
+
+  // 433 MHz Radio-Modul  
+    if (!driver.init())
+         Serial.println("init failed");
+         //lcd.setCursor(0,0);
+         //lcd.print("Error Init Radio!");
+
+/* Initialise the 1st sensor */
+  tcaselect(2);
+  if(!bme1.begin())
+  {
+    Serial.println("Error Init S1 - BME280!");
+    while(1);
+    lcd.setCursor(0,2);
+    lcd.print("Error Init S1 BME280!");
+  }
+
+    /* Initialise the 2nd sensor */
+  tcaselect(5);
+  if(!bme2.begin())
+  {
+    Serial.println("Error Init S2 - BME280!");
+    while(1);
+    lcd.setCursor(0,2);
+    lcd.print("Error Init S2 BME280!");
+  }
+
+ // AZ-Delivery 2 Relay Module 2PH63091A - Tongling 5VDC JQC-3FF-S-Z
+  relay_init(); //initialize the relay
+
+ // RED and GREEN - LED
+  pinMode(LED_green, OUTPUT);
+  pinMode(LED_red, OUTPUT);
+
+}
+
+
+/* Loop */
+void loop()
+{  
+    uint8_t buf[RH_ASK_MAX_MESSAGE_LEN];
+    uint8_t buflen = sizeof(buf);
+
+    if (driver.recv(buf, &buflen)) // Non-blocking
+    {
+    int i;
+
+    // Message with a good checksum received, dump it.
+    driver.printBuffer("Got:", buf, buflen);
+        memcpy(&myData, buf, sizeof(myData));
+        //Serial.println();
+       
+        //Serial.print("press_norm: ");
+        //Serial.print(myData.press_norm);
+       
+        //Serial.print("  press_hg: ");
+        //Serial.print(myData.press_hg);
+
+        Serial.print("Counter - Remote: ");
+        Serial.println(myData.counter);
+        Serial.println();
+       
+        Serial.print("Temp_3 = ");
+        Serial.print(myData.temp);
+        Serial.println(" *C");
+        temp_3_remote = myData.temp;
+        
+        Serial.print("Humi_3 = ");
+        Serial.print(myData.humidity);
+        Serial.println(" %"); 
+        humi_3_remote = myData.humidity;
+
+        Serial.println();
+    }
+
+
+// Kontroll-Output der Sensoren auf Serial-Monitor
+printValues_bme1();
+printValues_bme2();
+
+printLCD();
+
+if (bme1.readTemperature() <= low_temp_threshold) {
+ relay_SetStatus(ON, OFF);//turn on RELAY_1
+ digitalWrite(LED_red, HIGH);
+ digitalWrite(LED_green, LOW);
+} else if (bme1.readTemperature() >= high_temp_threshold) {
+ relay_SetStatus(OFF, ON);//turn on RELAY_2   
+ digitalWrite(LED_red, HIGH);
+ digitalWrite(LED_green, LOW);
+} else if ((bme1.readTemperature() >= low_temp_threshold) && (bme1.readTemperature() <= high_temp_threshold)) {
+   relay_SetStatus(OFF, OFF);//turn off all RELAYs > target temperature range reached
+ digitalWrite(LED_red, LOW);
+ digitalWrite(LED_green, HIGH);
+}
+
+delay(delay_time);
+
+}
+
+void printValues_bme1() {    
+  tcaselect(2); // Multiplexer wechselt auf Kanal2
+    Serial.print("Temp_1 = ");
+    Serial.print(bme1.readTemperature());
+    Serial.println(" *C");
+
+    //Serial.print("Pressure_1 = ");
+
+    //Serial.print(bme1.readPressure() / 100.0F);
+    //Serial.println(" hPa");
+
+    //Serial.print("Approx. Altitude = ");
+    //Serial.print(bme1.readAltitude(SEALEVELPRESSURE_HPA));
+    //Serial.println(" m");
+
+    Serial.print("Humi_1 = ");
+    Serial.print(bme1.readHumidity());
+    Serial.println(" %");
+
+    Serial.println();
+}
+
+
+void printValues_bme2() {  
+  tcaselect(5); // Multiplexer wechselt auf Kanal5
+    Serial.print("Temp_2 = ");
+    Serial.print(bme2.readTemperature());
+    Serial.println(" *C");
+
+    //Serial.print("Pressure_2 = ");
+
+    //Serial.print(bme2.readPressure() / 100.0F);
+    //Serial.println(" hPa");
+
+    //Serial.print("Approx. Altitude = ");
+    //Serial.print(bme2.readAltitude(SEALEVELPRESSURE_HPA));
+    //Serial.println(" m");
+
+    Serial.print("Humi_2 = ");
+    Serial.print(bme2.readHumidity());
+    Serial.println(" %");
+
+    Serial.println();
+}
+
+void printLCD() {
+    lcd.setCursor(4,0);
+    lcd.print("Temp *C");
+    lcd.setCursor(12,0); // signals that temp update is in progress
+    lcd.cursor_on();
+    delay(500); 
+    lcd.cursor_off();
+    lcd.setCursor(14,0);
+    lcd.print("Humi %");
+    lcd.setCursor(0,1);
+    lcd.print("S1: ");
+    lcd.print(bme1.readTemperature()); 
+    lcd.setCursor(14,1);
+    lcd.print(bme1.readHumidity());  
+    lcd.setCursor(0,2);
+    lcd.print("S2: ");
+    lcd.print(bme2.readTemperature());
+    lcd.setCursor(14,2);
+    lcd.print(bme2.readHumidity());  
+    lcd.setCursor(0,3);
+    lcd.print("S3: ");
+    lcd.print(temp_3_remote);
+    lcd.setCursor(14,3);
+    lcd.print(humi_3_remote);
+}
+
+
+void relay_init(void) //initialize the relay
+{
+  //set all the relays OUTPUT
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  relay_SetStatus(OFF, OFF); //turn off all the relay
+}
+
+
+//set the status of relays
+void relay_SetStatus( unsigned char status_1,  unsigned char status_2)
+{
+  digitalWrite(IN1, status_1);
+  digitalWrite(IN2, status_2);
+}
